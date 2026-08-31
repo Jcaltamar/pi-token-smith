@@ -1,0 +1,22 @@
+# Go
+/bin/
+*.exe
+*.test
+*.out
+coverage.out
+
+# Node and TypeScript
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+
+# Local development indexes
+.codegraph/
+
+# Pi Token Smith local runtime artifacts
+token-smith.sqlite
+token-smith.sqlite-*
+token-smith.sock
+token-smith.lock
+http.token
