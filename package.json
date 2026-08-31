@@ -2,7 +2,9 @@
   "name": "pi-token-smith",
   "private": true,
   "version": "0.0.0",
+  "type": "module",
   "scripts": {
+    "test": "node --test extension/protocol.test.mjs",
     "typecheck": "tsc --noEmit"
   }
 }
