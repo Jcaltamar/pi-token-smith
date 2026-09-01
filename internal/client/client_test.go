@@ -311,8 +311,11 @@ func TestClientIntegrationWithDaemonAndCancellationCleanup(t *testing.T) {
 		t.Fatalf("Health() = %#v, %v", health, err)
 	}
 	events, err := c.Search(context.Background(), "exact", 10)
-	if err != nil || len(events) != 1 || events[0].ID != "event" {
+	if err != nil || len(events) != 1 {
 		t.Fatalf("Search() = %#v, %v", events, err)
+	}
+	if got, want := events[0], (EventReference{ID: "event", ProjectID: "project", SessionID: "session", ExchangeID: "exchange", Sequence: 1}); got != want {
+		t.Fatalf("Search() event = %#v, want %#v", got, want)
 	}
 	var got bytes.Buffer
 	metadata, err := c.ReadPayload(context.Background(), "event", 6, 5, &got)

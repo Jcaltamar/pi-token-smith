@@ -53,7 +53,7 @@ type ReadResult struct { TotalSize, BytesWritten uint64; SHA256 string }
 type EventMetadata struct { TotalSize uint64; SHA256 string }
 
 // EventReference is a searchable event identity. FTS results are references only.
-type EventReference struct { ID, ProjectID, SessionID, ExchangeID string; Sequence int64 }
+type EventReference struct { ID string `json:"id"`; ProjectID string `json:"project_id"`; SessionID string `json:"session_id"`; ExchangeID string `json:"exchange_id"`; Sequence int64 `json:"sequence"` }
 
 // Settings reports effective connection settings verified at Open.
 type Settings struct { JournalMode string; ForeignKeys bool; BusyTimeout time.Duration }

@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
@@ -177,6 +178,13 @@ func TestAppendIsIdempotentAndRejectsConflictingID(t *testing.T) {
 	_, err = store.AppendEvent(ctx, event, bytes.NewReader([]byte("different evidence")), uint64(len("different evidence")))
 	if !errors.Is(err, ErrEventConflict) { t.Fatalf("conflicting AppendEvent() error = %v, want ErrEventConflict", err) }
 	assertEventCount(t, ctx, store, "same-id", 1)
+}
+
+func TestEventReferenceMarshalsSnakeCaseJSON(t *testing.T) {
+	got, err := json.Marshal(EventReference{ID: "event-1", ProjectID: "project-1", SessionID: "session-1", ExchangeID: "exchange-1", Sequence: 42})
+	if err != nil { t.Fatalf("Marshal(EventReference) error = %v", err) }
+	const want = `{"id":"event-1","project_id":"project-1","session_id":"session-1","exchange_id":"exchange-1","sequence":42}`
+	if string(got) != want { t.Fatalf("Marshal(EventReference) = %s, want %s", got, want) }
 }
 
 func TestSearchIndexesOnlyValidUTF8Chunks(t *testing.T) {
