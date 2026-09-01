@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "test": "node --test extension/*.test.mjs",
+    "test:e2e": "node --experimental-strip-types --test e2e/capture.test.mjs",
     "typecheck": "tsc --noEmit"
   },
   "pi": {
