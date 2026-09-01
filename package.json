@@ -4,7 +4,15 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "test": "node --test extension/protocol.test.mjs",
+    "test": "node --test extension/*.test.mjs",
     "typecheck": "tsc --noEmit"
+  },
+  "pi": {
+    "extensions": ["./extension/index.ts"]
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "0.84.3",
+    "@types/node": "22.19.19",
+    "typescript": "5.9.3"
   }
 }
