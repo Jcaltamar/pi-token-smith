@@ -15,6 +15,7 @@ import (
 
 	"github.com/Jcaltamar/pi-token-smith/internal/client"
 	"github.com/Jcaltamar/pi-token-smith/internal/daemon"
+	"github.com/Jcaltamar/pi-token-smith/internal/httpapi"
 )
 
 // RPCClient is the read-only daemon surface required by the CLI.
@@ -31,6 +32,13 @@ type Server interface {
 	Close() error
 }
 type ServerFactory func(daemon.RuntimePaths) Server
+type HTTPServer interface {
+	Start() error
+	URL() string
+	Close(context.Context) error
+}
+type HTTPServerFactory func(RPCClient, string, string) (HTTPServer, error)
+type HTTPTokenLoader func(daemon.RuntimePaths) (string, error)
 
 // Dependencies are process boundaries injected for deterministic command tests.
 type Dependencies struct {
@@ -39,10 +47,14 @@ type Dependencies struct {
 	Paths          daemon.RuntimePaths
 	NewClient      ClientFactory
 	NewServer      ServerFactory
+	LoadHTTPToken  HTTPTokenLoader
+	NewHTTPServer  HTTPServerFactory
 }
 
 func DefaultDependencies(paths daemon.RuntimePaths) Dependencies {
-	return Dependencies{Stdin: os.Stdin, Stdout: os.Stdout, Stderr: os.Stderr, Paths: paths, NewClient: func(socket string) RPCClient { return client.New(socket, client.Options{}) }, NewServer: func(paths daemon.RuntimePaths) Server { return daemon.NewServer(paths) }}
+	return Dependencies{Stdin: os.Stdin, Stdout: os.Stdout, Stderr: os.Stderr, Paths: paths, NewClient: func(socket string) RPCClient { return client.New(socket, client.Options{}) }, NewServer: func(paths daemon.RuntimePaths) Server { return daemon.NewServer(paths) }, LoadHTTPToken: daemon.LoadOrCreateHTTPToken, NewHTTPServer: func(c RPCClient, token, listen string) (HTTPServer, error) {
+		return httpapi.New(c, token, httpapi.Options{Listen: listen})
+	}}
 }
 
 type ExitError struct{ Message string }
@@ -81,13 +93,15 @@ func Run(ctx context.Context, args []string, deps Dependencies) error {
 		return runInspect(ctx, args[1:], deps)
 	case "doctor":
 		return runDoctor(ctx, args[1:], deps)
+	case "serve":
+		return runServe(ctx, args[1:], deps)
 	default:
 		printUsage(deps.Stderr)
 		return usage("unknown command: " + args[0])
 	}
 }
 func printUsage(w io.Writer) {
-	_, _ = fmt.Fprint(w, "usage: pi-token-smith <daemon|status|search|inspect|doctor> [options]\n")
+	_, _ = fmt.Fprint(w, "usage: pi-token-smith <daemon|status|search|inspect|doctor|serve> [options]\n")
 }
 func flags(name string, stderr io.Writer) *flag.FlagSet {
 	f := flag.NewFlagSet(name, flag.ContinueOnError)
@@ -212,6 +226,45 @@ func inspectFile(ctx context.Context, c RPCClient, id string, offset, limit uint
 	complete = true
 	return nil
 }
+func runServe(ctx context.Context, args []string, deps Dependencies) error {
+	if deps.LoadHTTPToken == nil || deps.NewHTTPServer == nil {
+		return errors.New("CLI serve dependencies are incomplete")
+	}
+	f := flags("serve", deps.Stderr)
+	listen := f.String("listen", "127.0.0.1:0", "loopback listen address")
+	if err := f.Parse(args); err != nil {
+		return usage(err.Error())
+	}
+	if f.NArg() != 0 {
+		return usage("serve accepts no arguments")
+	}
+	c, err := getClient(deps)
+	if err != nil {
+		return err
+	}
+	defer c.Close()
+	if _, err := c.Health(ctx); err != nil {
+		return fmt.Errorf("daemon unavailable: %w", err)
+	}
+	token, err := deps.LoadHTTPToken(deps.Paths)
+	if err != nil {
+		return fmt.Errorf("load HTTP token: %w", err)
+	}
+	s, err := deps.NewHTTPServer(c, token, *listen)
+	if err != nil {
+		return fmt.Errorf("configure HTTP server: %w", err)
+	}
+	if err := s.Start(); err != nil {
+		return fmt.Errorf("start HTTP server: %w", err)
+	}
+	defer s.Close(context.Background())
+	if _, err := fmt.Fprintln(deps.Stdout, s.URL()); err != nil {
+		return err
+	}
+	<-ctx.Done()
+	return nil
+}
+
 func runDoctor(ctx context.Context, args []string, deps Dependencies) error {
 	if len(args) != 0 {
 		return usage("doctor accepts no arguments")

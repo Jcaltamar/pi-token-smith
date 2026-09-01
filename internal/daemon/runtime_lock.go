@@ -4,6 +4,7 @@ package daemon
 
 import (
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -211,46 +212,195 @@ func randomOwnerToken() (string, error) {
 	return hex.EncodeToString(bytes), nil
 }
 
-type socketIdentity struct { device uint64; inode uint64 }
+const httpTokenBytes = 32
+
+// LoadOrCreateHTTPToken returns the private HTTP bearer token stored beneath the
+// protected runtime directory. The token is never suitable for display or logs.
+func LoadOrCreateHTTPToken(paths RuntimePaths) (string, error) {
+	if filepath.Clean(filepath.Dir(paths.HTTPToken)) != filepath.Clean(paths.Root) || filepath.Base(paths.HTTPToken) != "http.token" {
+		return "", errors.New("HTTP token path is outside runtime directory")
+	}
+	if err := EnsureRuntimeDirectory(paths); err != nil {
+		return "", err
+	}
+	directory, err := openRuntimeDirectory(paths.Root)
+	if err != nil {
+		return "", err
+	}
+	defer unix.Close(directory)
+
+	for attempts := 0; attempts < 2; attempts++ {
+		token, exists, err := readHTTPTokenAt(directory)
+		if err != nil {
+			return "", err
+		}
+		if exists {
+			return token, nil
+		}
+		created, err := createHTTPTokenAt(directory)
+		if err == nil {
+			return created, nil
+		}
+		if !errors.Is(err, unix.EEXIST) {
+			return "", err
+		}
+	}
+	return "", errors.New("HTTP token creation did not converge")
+}
+
+func readHTTPTokenAt(directory int) (string, bool, error) {
+	var pathStat unix.Stat_t
+	if err := unix.Fstatat(directory, "http.token", &pathStat, unix.AT_SYMLINK_NOFOLLOW); errors.Is(err, unix.ENOENT) {
+		return "", false, nil
+	} else if err != nil {
+		return "", false, fmt.Errorf("inspect HTTP token without following symlinks: %w", err)
+	}
+	// Reject special nodes before open: opening a FIFO for reading can block.
+	if pathStat.Mode&unix.S_IFMT != unix.S_IFREG {
+		return "", false, errors.New("HTTP token is not a regular file")
+	}
+	fd, err := unix.Openat(directory, "http.token", unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return "", false, fmt.Errorf("open HTTP token without following symlinks: %w", err)
+	}
+	defer unix.Close(fd)
+	var stat unix.Stat_t
+	if err := unix.Fstat(fd, &stat); err != nil {
+		return "", false, fmt.Errorf("inspect HTTP token: %w", err)
+	}
+	if stat.Mode&unix.S_IFMT != unix.S_IFREG {
+		return "", false, errors.New("HTTP token is not a regular file")
+	}
+	if err := unix.Fchmod(fd, uint32(privateFileMode)); err != nil {
+		return "", false, fmt.Errorf("protect HTTP token: %w", err)
+	}
+	if stat.Size < 43 || stat.Size > 512 {
+		return "", false, errors.New("HTTP token is malformed")
+	}
+	data := make([]byte, stat.Size)
+	for read := 0; read < len(data); {
+		n, err := unix.Read(fd, data[read:])
+		if err != nil {
+			return "", false, fmt.Errorf("read HTTP token: %w", err)
+		}
+		if n == 0 {
+			return "", false, errors.New("HTTP token is malformed")
+		}
+		read += n
+	}
+	token := string(data)
+	decoded, err := base64.RawURLEncoding.DecodeString(token)
+	if err != nil || len(decoded) < httpTokenBytes || base64.RawURLEncoding.EncodeToString(decoded) != token {
+		return "", false, errors.New("HTTP token is malformed")
+	}
+	return token, true, nil
+}
+
+func createHTTPTokenAt(directory int) (string, error) {
+	data := make([]byte, httpTokenBytes)
+	if _, err := io.ReadFull(rand.Reader, data); err != nil {
+		return "", fmt.Errorf("generate HTTP token: %w", err)
+	}
+	token := base64.RawURLEncoding.EncodeToString(data)
+	temporarySuffix, err := randomOwnerToken()
+	if err != nil {
+		return "", fmt.Errorf("generate HTTP token temporary name: %w", err)
+	}
+	temporaryName := ".http.token.tmp-" + temporarySuffix
+	fd, err := unix.Openat(directory, temporaryName, unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_NOFOLLOW|unix.O_CLOEXEC, uint32(privateFileMode))
+	if err != nil {
+		return "", err
+	}
+	defer unix.Close(fd)
+	defer unix.Unlinkat(directory, temporaryName, 0)
+	if err := unix.Fchmod(fd, uint32(privateFileMode)); err != nil {
+		return "", fmt.Errorf("protect HTTP token: %w", err)
+	}
+	for remaining := []byte(token); len(remaining) > 0; {
+		written, err := unix.Write(fd, remaining)
+		if err != nil {
+			return "", fmt.Errorf("write HTTP token: %w", err)
+		}
+		if written == 0 {
+			return "", errors.New("write HTTP token: no progress")
+		}
+		remaining = remaining[written:]
+	}
+	if err := unix.Fsync(fd); err != nil {
+		return "", fmt.Errorf("sync HTTP token: %w", err)
+	}
+	if err := unix.Renameat2(directory, temporaryName, directory, "http.token", unix.RENAME_NOREPLACE); err != nil {
+		return "", err
+	}
+	return token, nil
+}
+
+type socketIdentity struct {
+	device uint64
+	inode  uint64
+}
 
 func socketIdentityAt(paths RuntimePaths) (*socketIdentity, error) {
 	directory, err := openRuntimeDirectory(paths.Root)
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	defer unix.Close(directory)
 	var stat unix.Stat_t
-	if err := unix.Fstatat(directory, filepath.Base(paths.Socket), &stat, unix.AT_SYMLINK_NOFOLLOW); err != nil { return nil, fmt.Errorf("inspect bound Unix socket: %w", err) }
-	if stat.Mode&unix.S_IFMT != unix.S_IFSOCK { return nil, errors.New("bound socket path is not a Unix socket") }
-	return &socketIdentity{device:uint64(stat.Dev), inode:uint64(stat.Ino)}, nil
+	if err := unix.Fstatat(directory, filepath.Base(paths.Socket), &stat, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		return nil, fmt.Errorf("inspect bound Unix socket: %w", err)
+	}
+	if stat.Mode&unix.S_IFMT != unix.S_IFSOCK {
+		return nil, errors.New("bound socket path is not a Unix socket")
+	}
+	return &socketIdentity{device: uint64(stat.Dev), inode: uint64(stat.Ino)}, nil
 }
 
 // removeStaleSocket atomically quarantines the candidate before inspecting it.
 // The runtime directory and daemon lock establish authority over this namespace.
 func removeStaleSocket(paths RuntimePaths, expected *socketIdentity) error {
 	directory, err := openRuntimeDirectory(paths.Root)
-	if err != nil { return err }
+	if err != nil {
+		return err
+	}
 	defer unix.Close(directory)
 	name := filepath.Base(paths.Socket)
 	var quarantine string
 	for i := 0; i < 4; i++ {
-		token, tokenErr := randomOwnerToken(); if tokenErr != nil { return fmt.Errorf("generate socket quarantine name: %w", tokenErr) }
+		token, tokenErr := randomOwnerToken()
+		if tokenErr != nil {
+			return fmt.Errorf("generate socket quarantine name: %w", tokenErr)
+		}
 		quarantine = "." + name + ".quarantine-" + token
 		var stat unix.Stat_t
-		if err := unix.Fstatat(directory, quarantine, &stat, unix.AT_SYMLINK_NOFOLLOW); errors.Is(err, unix.ENOENT) { break }
-		if i == 3 { return errors.New("allocate unique socket quarantine name") }
+		if err := unix.Fstatat(directory, quarantine, &stat, unix.AT_SYMLINK_NOFOLLOW); errors.Is(err, unix.ENOENT) {
+			break
+		}
+		if i == 3 {
+			return errors.New("allocate unique socket quarantine name")
+		}
 	}
 	if err := unix.Renameat(directory, name, directory, quarantine); err != nil {
-		if errors.Is(err, unix.ENOENT) { return nil }
+		if errors.Is(err, unix.ENOENT) {
+			return nil
+		}
 		return fmt.Errorf("quarantine Unix socket: %w", err)
 	}
 	var stat unix.Stat_t
 	inspectErr := unix.Fstatat(directory, quarantine, &stat, unix.AT_SYMLINK_NOFOLLOW)
 	valid := inspectErr == nil && stat.Mode&unix.S_IFMT == unix.S_IFSOCK && (expected == nil || (uint64(stat.Dev) == expected.device && uint64(stat.Ino) == expected.inode))
 	if valid {
-		if err := unix.Unlinkat(directory, quarantine, 0); err != nil { return fmt.Errorf("remove quarantined Unix socket: %w", err) }
+		if err := unix.Unlinkat(directory, quarantine, 0); err != nil {
+			return fmt.Errorf("remove quarantined Unix socket: %w", err)
+		}
 		return nil
 	}
 	// Never overwrite a node created after quarantine; preserve the unexpected node.
-	if err := unix.Renameat2(directory, quarantine, directory, name, unix.RENAME_NOREPLACE); err != nil { return fmt.Errorf("unexpected socket node preserved at quarantine after failed restore: %w", err) }
-	if inspectErr != nil { return fmt.Errorf("inspect quarantined socket: %w", inspectErr) }
+	if err := unix.Renameat2(directory, quarantine, directory, name, unix.RENAME_NOREPLACE); err != nil {
+		return fmt.Errorf("unexpected socket node preserved at quarantine after failed restore: %w", err)
+	}
+	if inspectErr != nil {
+		return fmt.Errorf("inspect quarantined socket: %w", inspectErr)
+	}
 	return errors.New("socket path exists but is not the expected Unix socket")
 }
