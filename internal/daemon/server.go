@@ -144,6 +144,9 @@ func (s *Server) Start(ctx context.Context) (err error) {
 	if err != nil {
 		return err
 	}
+	if _, err = store.RecoverPendingCaptures(ctx); err != nil {
+		return fmt.Errorf("recover pending captures: %w", err)
+	}
 	listener, err = net.ListenUnix("unix", &net.UnixAddr{Name: s.paths.Socket, Net: "unix"})
 	if err != nil {
 		return fmt.Errorf("listen Unix socket: %w", err)
@@ -292,17 +295,28 @@ func (s *Server) captureAppend(connection net.Conn, request protocol.Request) bo
 		_ = s.writeError(connection, request.RequestID, "invalid_request", "capture request is invalid")
 		return true
 	}
-	declared, err := protocol.ReadEvidenceHeader(connection)
-	if err != nil || declared != body.PayloadSize || declared > uint64(^uint(0)>>1) {
-		_ = s.writeError(connection, request.RequestID, "invalid_request", "capture evidence is invalid")
-		return true
-	}
 	s.mu.Lock()
 	store := s.store
 	s.mu.Unlock()
+	attempt := storage.Attempt{AttemptID: request.RequestID, EventID: body.EventID, EventType: body.EventType, ProjectID: body.ProjectID, SessionID: body.SessionID, ExchangeID: body.ExchangeID, ProtocolVersion: request.ProtocolVersion, Sequence: body.Sequence, OccurredAt: body.OccurredAt.UTC(), Encoding: body.Encoding, DeclaredSize: body.PayloadSize}
+	if err := store.BeginCaptureAttempt(context.Background(), attempt); err != nil {
+		_ = s.writeStorageError(connection, request.RequestID, err)
+		return true
+	}
+	declared, err := protocol.ReadEvidenceHeader(connection)
+	if err != nil || declared != body.PayloadSize || declared > uint64(^uint64(0)>>1) {
+		_ = store.MarkCaptureIncomplete(context.Background(), request.RequestID, storage.CaptureFailureHeader)
+		_ = s.writeError(connection, request.RequestID, "invalid_request", "capture evidence is invalid")
+		return true
+	}
 	result, err := store.AppendEvent(context.Background(), storage.Event{ID: body.EventID, EventType: body.EventType, ProjectID: body.ProjectID, SessionID: body.SessionID, ExchangeID: body.ExchangeID, ProtocolVersion: request.ProtocolVersion, Sequence: body.Sequence, OccurredAt: body.OccurredAt, Encoding: body.Encoding}, io.LimitReader(connection, int64(declared)), declared)
 	if err != nil {
+		_ = store.MarkCaptureIncomplete(context.Background(), request.RequestID, storage.CaptureFailureAppend)
 		_ = s.writeStorageError(connection, request.RequestID, err)
+		return true
+	}
+	if err = store.CompleteCaptureAttempt(context.Background(), request.RequestID); err != nil {
+		_ = s.writeError(connection, request.RequestID, "internal", "internal server error")
 		return true
 	}
 	return s.writeOK(connection, request.RequestID, map[string]any{"actual_size": result.ActualSize, "sha256": result.SHA256, "already_present": result.AlreadyPresent})
