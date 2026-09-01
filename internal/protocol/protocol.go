@@ -94,13 +94,32 @@ func WriteFrame(w io.Writer, payload []byte) error {
 	return nil
 }
 
-// WriteEvidence writes a data-plane length header and streams exactly length
-// bytes from evidence. It uses bounded buffering and returns integrity metadata.
-func WriteEvidence(w io.Writer, length uint64, evidence io.Reader) (EvidenceMetadata, error) {
+// WriteEvidenceHeader writes only the fixed-size data-plane length header.
+// Callers can then stream exactly that many bytes without copying them into a frame.
+func WriteEvidenceHeader(w io.Writer, length uint64) error {
 	var header [8]byte
 	binary.BigEndian.PutUint64(header[:], length)
 	if err := writeAll(w, header[:]); err != nil {
-		return EvidenceMetadata{}, fmt.Errorf("write evidence header: %w", err)
+		return fmt.Errorf("write evidence header: %w", err)
+	}
+	return nil
+}
+
+// ReadEvidenceHeader reads only the fixed-size data-plane length header. The
+// caller owns the following evidence bytes and should bound reads to this length.
+func ReadEvidenceHeader(r io.Reader) (uint64, error) {
+	var header [8]byte
+	if _, err := io.ReadFull(r, header[:]); err != nil {
+		return 0, fmt.Errorf("read evidence header: %w", err)
+	}
+	return binary.BigEndian.Uint64(header[:]), nil
+}
+
+// WriteEvidence writes a data-plane length header and streams exactly length
+// bytes from evidence. It uses bounded buffering and returns integrity metadata.
+func WriteEvidence(w io.Writer, length uint64, evidence io.Reader) (EvidenceMetadata, error) {
+	if err := WriteEvidenceHeader(w, length); err != nil {
+		return EvidenceMetadata{}, err
 	}
 	metadata, err := streamEvidence(evidence, w, length)
 	if err != nil {
@@ -112,11 +131,11 @@ func WriteEvidence(w io.Writer, length uint64, evidence io.Reader) (EvidenceMeta
 // ReadEvidence reads a data-plane length header and streams exactly its declared
 // payload to destination. It never allocates based on the declared length.
 func ReadEvidence(r io.Reader, destination io.Writer) (EvidenceMetadata, error) {
-	var header [8]byte
-	if _, err := io.ReadFull(r, header[:]); err != nil {
-		return EvidenceMetadata{}, fmt.Errorf("read evidence header: %w", err)
+	length, err := ReadEvidenceHeader(r)
+	if err != nil {
+		return EvidenceMetadata{}, err
 	}
-	metadata, err := streamEvidence(r, destination, binary.BigEndian.Uint64(header[:]))
+	metadata, err := streamEvidence(r, destination, length)
 	if err != nil {
 		return EvidenceMetadata{}, fmt.Errorf("read evidence payload: %w", err)
 	}

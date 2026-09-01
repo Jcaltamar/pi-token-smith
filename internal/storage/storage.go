@@ -49,6 +49,9 @@ type AppendResult struct {
 // ReadResult describes a paginated evidence read. A limit of zero reads all bytes after offset.
 type ReadResult struct { TotalSize, BytesWritten uint64; SHA256 string }
 
+// EventMetadata identifies stored evidence without reading any evidence bytes.
+type EventMetadata struct { TotalSize uint64; SHA256 string }
+
 // EventReference is a searchable event identity. FTS results are references only.
 type EventReference struct { ID, ProjectID, SessionID, ExchangeID string; Sequence int64 }
 
@@ -131,12 +134,21 @@ func (s *Store) AppendEvent(ctx context.Context, event Event, evidence io.Reader
 	return AppendResult{ActualSize:size, SHA256:hash}, nil
 }
 
+// EventMetadata looks up integrity metadata without emitting evidence bytes.
+func (s *Store) EventMetadata(ctx context.Context, eventID string) (EventMetadata, error) {
+	if err := ctx.Err(); err != nil { return EventMetadata{}, err }
+	var metadata EventMetadata
+	if err := s.db.QueryRowContext(ctx, "SELECT actual_size, payload_sha256 FROM capture_events WHERE id = ?", eventID).Scan(&metadata.TotalSize, &metadata.SHA256); errors.Is(err, sql.ErrNoRows) { return EventMetadata{}, ErrEventNotFound } else if err != nil { return EventMetadata{}, err }
+	return metadata, nil
+}
+
 // ReadEventEvidence streams exact stored bytes to destination. It seeks directly to the first chunk intersecting offset and does not load the full evidence. A limit of zero reads all remaining bytes.
 func (s *Store) ReadEventEvidence(ctx context.Context, eventID string, offset, limit uint64, destination io.Writer) (ReadResult, error) {
 	if err := ctx.Err(); err != nil { return ReadResult{}, err }
 	if destination == nil { return ReadResult{}, errors.New("storage evidence destination is nil") }
-	var total uint64; var hash string
-	if err := s.db.QueryRowContext(ctx, "SELECT actual_size, payload_sha256 FROM capture_events WHERE id = ?", eventID).Scan(&total, &hash); errors.Is(err, sql.ErrNoRows) { return ReadResult{}, ErrEventNotFound } else if err != nil { return ReadResult{}, err }
+	metadata, err := s.EventMetadata(ctx, eventID)
+	if err != nil { return ReadResult{}, err }
+	total, hash := metadata.TotalSize, metadata.SHA256
 	result := ReadResult{TotalSize:total, SHA256:hash}
 	if offset >= total { return result, nil }
 	remaining := total-offset; if limit != 0 && limit < remaining { remaining = limit }
@@ -161,9 +173,11 @@ func (s *Store) ReadEventEvidence(ctx context.Context, eventID string, offset, l
 	return result, nil
 }
 
-// SearchEvents searches the rebuildable FTS projection. Each valid UTF-8 chunk is indexed separately, so terms spanning chunk boundaries do not match.
-func (s *Store) SearchEvents(ctx context.Context, query string) ([]EventReference, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT DISTINCT e.id, e.project_id, e.session_id, COALESCE(e.exchange_id, ''), e.sequence FROM capture_fts f JOIN capture_events e ON e.id = f.event_id WHERE capture_fts MATCH ? ORDER BY e.project_id, e.session_id, e.sequence, e.id`, query)
+// SearchEvents searches the rebuildable FTS projection with a positive SQL limit.
+// Each valid UTF-8 chunk is indexed separately, so terms spanning chunk boundaries do not match.
+func (s *Store) SearchEvents(ctx context.Context, query string, limit int) ([]EventReference, error) {
+	if limit <= 0 { return nil, errors.New("search limit must be positive") }
+	rows, err := s.db.QueryContext(ctx, `SELECT DISTINCT e.id, e.project_id, e.session_id, COALESCE(e.exchange_id, ''), e.sequence FROM capture_fts f JOIN capture_events e ON e.id = f.event_id WHERE capture_fts MATCH ? ORDER BY e.project_id, e.session_id, e.sequence, e.id LIMIT ?`, query, limit)
 	if err != nil { return nil, err }; defer rows.Close()
 	var matches []EventReference
 	for rows.Next() { var match EventReference; if err:=rows.Scan(&match.ID,&match.ProjectID,&match.SessionID,&match.ExchangeID,&match.Sequence); err != nil{return nil,err}; matches=append(matches,match) }

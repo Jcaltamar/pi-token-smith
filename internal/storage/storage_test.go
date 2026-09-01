@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -184,9 +185,23 @@ func TestSearchIndexesOnlyValidUTF8Chunks(t *testing.T) {
 	defer store.Close()
 	if _, err := store.AppendEvent(ctx, testEvent("searchable", 1), strings.NewReader("alpha needle omega"), uint64(len("alpha needle omega"))); err != nil { t.Fatal(err) }
 	if _, err := store.AppendEvent(ctx, testEvent("binary", 2), bytes.NewReader([]byte{0xff, ' ', 'n', 'e', 'e', 'd', 'l', 'e'}), 8); err != nil { t.Fatal(err) }
-	matches, err := store.SearchEvents(ctx, "needle")
+	matches, err := store.SearchEvents(ctx, "needle", 10)
 	if err != nil { t.Fatalf("SearchEvents() error = %v", err) }
 	if len(matches) != 1 || matches[0].ID != "searchable" { t.Fatalf("SearchEvents() = %#v, want searchable only", matches) }
+}
+
+func TestSearchHonorsPositiveLimit(t *testing.T) {
+	ctx := context.Background()
+	store := openStore(t, ctx, filepath.Join(t.TempDir(), "evidence.sqlite"))
+	defer store.Close()
+	for i := 0; i < 5; i++ {
+		id := "limited-" + strconv.Itoa(i)
+		payload := []byte("bounded needle")
+		if _, err := store.AppendEvent(ctx, testEvent(id, int64(i)), bytes.NewReader(payload), uint64(len(payload))); err != nil { t.Fatal(err) }
+	}
+	matches, err := store.SearchEvents(ctx, "needle", 2)
+	if err != nil || len(matches) != 2 { t.Fatalf("SearchEvents() = %d matches, %v; want 2, nil", len(matches), err) }
+	if _, err := store.SearchEvents(ctx, "needle", 0); err == nil { t.Fatal("SearchEvents() with zero limit succeeded") }
 }
 
 func TestSearchDoesNotJoinTextAcrossChunkBoundaries(t *testing.T) {
@@ -195,7 +210,7 @@ func TestSearchDoesNotJoinTextAcrossChunkBoundaries(t *testing.T) {
 	defer store.Close()
 	payload := []byte(strings.Repeat("x", ChunkSize-1) + "needle")
 	if _, err := store.AppendEvent(ctx, testEvent("split-token", 1), bytes.NewReader(payload), uint64(len(payload))); err != nil { t.Fatal(err) }
-	matches, err := store.SearchEvents(ctx, "needle")
+	matches, err := store.SearchEvents(ctx, "needle", 10)
 	if err != nil { t.Fatalf("SearchEvents() error = %v", err) }
 	if len(matches) != 0 { t.Fatalf("SearchEvents() = %#v, want no cross-chunk match", matches) }
 }

@@ -210,3 +210,47 @@ func randomOwnerToken() (string, error) {
 	}
 	return hex.EncodeToString(bytes), nil
 }
+
+type socketIdentity struct { device uint64; inode uint64 }
+
+func socketIdentityAt(paths RuntimePaths) (*socketIdentity, error) {
+	directory, err := openRuntimeDirectory(paths.Root)
+	if err != nil { return nil, err }
+	defer unix.Close(directory)
+	var stat unix.Stat_t
+	if err := unix.Fstatat(directory, filepath.Base(paths.Socket), &stat, unix.AT_SYMLINK_NOFOLLOW); err != nil { return nil, fmt.Errorf("inspect bound Unix socket: %w", err) }
+	if stat.Mode&unix.S_IFMT != unix.S_IFSOCK { return nil, errors.New("bound socket path is not a Unix socket") }
+	return &socketIdentity{device:uint64(stat.Dev), inode:uint64(stat.Ino)}, nil
+}
+
+// removeStaleSocket atomically quarantines the candidate before inspecting it.
+// The runtime directory and daemon lock establish authority over this namespace.
+func removeStaleSocket(paths RuntimePaths, expected *socketIdentity) error {
+	directory, err := openRuntimeDirectory(paths.Root)
+	if err != nil { return err }
+	defer unix.Close(directory)
+	name := filepath.Base(paths.Socket)
+	var quarantine string
+	for i := 0; i < 4; i++ {
+		token, tokenErr := randomOwnerToken(); if tokenErr != nil { return fmt.Errorf("generate socket quarantine name: %w", tokenErr) }
+		quarantine = "." + name + ".quarantine-" + token
+		var stat unix.Stat_t
+		if err := unix.Fstatat(directory, quarantine, &stat, unix.AT_SYMLINK_NOFOLLOW); errors.Is(err, unix.ENOENT) { break }
+		if i == 3 { return errors.New("allocate unique socket quarantine name") }
+	}
+	if err := unix.Renameat(directory, name, directory, quarantine); err != nil {
+		if errors.Is(err, unix.ENOENT) { return nil }
+		return fmt.Errorf("quarantine Unix socket: %w", err)
+	}
+	var stat unix.Stat_t
+	inspectErr := unix.Fstatat(directory, quarantine, &stat, unix.AT_SYMLINK_NOFOLLOW)
+	valid := inspectErr == nil && stat.Mode&unix.S_IFMT == unix.S_IFSOCK && (expected == nil || (uint64(stat.Dev) == expected.device && uint64(stat.Ino) == expected.inode))
+	if valid {
+		if err := unix.Unlinkat(directory, quarantine, 0); err != nil { return fmt.Errorf("remove quarantined Unix socket: %w", err) }
+		return nil
+	}
+	// Never overwrite a node created after quarantine; preserve the unexpected node.
+	if err := unix.Renameat2(directory, quarantine, directory, name, unix.RENAME_NOREPLACE); err != nil { return fmt.Errorf("unexpected socket node preserved at quarantine after failed restore: %w", err) }
+	if inspectErr != nil { return fmt.Errorf("inspect quarantined socket: %w", inspectErr) }
+	return errors.New("socket path exists but is not the expected Unix socket")
+}

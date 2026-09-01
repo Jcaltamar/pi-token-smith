@@ -132,6 +132,20 @@ func TestEvidenceHeaderSharedProtocolGoldenVector(t *testing.T) {
 	}
 }
 
+func TestEvidenceHeaderBoundsFollowingFrame(t *testing.T) {
+	var wire bytes.Buffer
+	if err := WriteEvidenceHeader(&wire, 3); err != nil { t.Fatalf("WriteEvidenceHeader() error = %v", err) }
+	wire.WriteString("one")
+	if err := WriteFrame(&wire, []byte(`{"next":true}`)); err != nil { t.Fatalf("WriteFrame() error = %v", err) }
+	length, err := ReadEvidenceHeader(&wire)
+	if err != nil || length != 3 { t.Fatalf("ReadEvidenceHeader() = %d, %v; want 3, nil", length, err) }
+	var evidence bytes.Buffer
+	if _, err := io.Copy(&evidence, io.LimitReader(&wire, int64(length))); err != nil { t.Fatalf("copy evidence: %v", err) }
+	if evidence.String() != "one" { t.Fatalf("evidence = %q", evidence.String()) }
+	frame, err := ReadFrame(&wire)
+	if err != nil || !bytes.Equal(frame, []byte(`{"next":true}`)) { t.Fatalf("following frame = %q, %v", frame, err) }
+}
+
 func TestEvidenceStreamsExactlyAndHashes(t *testing.T) {
 	payload := []byte{0, 10, 240, 159, 140, 141}
 	var wire bytes.Buffer
