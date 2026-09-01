@@ -64,6 +64,13 @@ type PayloadMetadata struct {
 	BytesWritten uint64 `json:"bytes_written"`
 }
 
+// EventMetadata identifies an event and its payload integrity data without reading evidence bytes.
+type EventMetadata struct {
+	EventID   string `json:"event_id"`
+	TotalSize uint64 `json:"total_size"`
+	SHA256    string `json:"sha256"`
+}
+
 // Client reuses one connection. Every operation owns the connection until its complete response is consumed.
 type Client struct {
 	socket  string
@@ -282,6 +289,25 @@ func (c *Client) Search(ctx context.Context, query string, limit int) ([]EventRe
 	}
 	err := c.call(ctx, "search.events", map[string]any{"query": query, "limit": limit}, &out)
 	return out.Events, err
+}
+
+// EventMetadata retrieves event integrity metadata without reading evidence bytes.
+func (c *Client) EventMetadata(ctx context.Context, eventID string) (EventMetadata, error) {
+	if eventID == "" {
+		return EventMetadata{}, errors.New("invalid event metadata arguments")
+	}
+	var out EventMetadata
+	err := c.call(ctx, "event.metadata", map[string]any{"event_id": eventID}, &out)
+	if err != nil {
+		return EventMetadata{}, err
+	}
+	if out.EventID != eventID || len(out.SHA256) != 64 {
+		return EventMetadata{}, errors.New("event metadata is invalid")
+	}
+	if _, err := hex.DecodeString(out.SHA256); err != nil {
+		return EventMetadata{}, errors.New("event metadata hash is invalid")
+	}
+	return out, nil
 }
 
 // ReadPayload streams one evidence data-plane frame directly to destination. A protocol/data-plane error poisons the connection.

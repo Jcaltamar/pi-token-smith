@@ -16,6 +16,7 @@ import (
 	"github.com/Jcaltamar/pi-token-smith/internal/client"
 	"github.com/Jcaltamar/pi-token-smith/internal/daemon"
 	"github.com/Jcaltamar/pi-token-smith/internal/httpapi"
+	mcpserver "github.com/Jcaltamar/pi-token-smith/internal/mcp"
 )
 
 // RPCClient is the read-only daemon surface required by the CLI.
@@ -23,6 +24,7 @@ type RPCClient interface {
 	Health(context.Context) (client.Health, error)
 	Info(context.Context) (client.Info, error)
 	Search(context.Context, string, int) ([]client.EventReference, error)
+	EventMetadata(context.Context, string) (client.EventMetadata, error)
 	ReadPayload(context.Context, string, uint64, uint64, io.Writer) (client.PayloadMetadata, error)
 	Close() error
 }
@@ -39,6 +41,10 @@ type HTTPServer interface {
 }
 type HTTPServerFactory func(RPCClient, string, string) (HTTPServer, error)
 type HTTPTokenLoader func(daemon.RuntimePaths) (string, error)
+type MCPServer interface {
+	Listen(context.Context, io.Reader, io.Writer) error
+}
+type MCPServerFactory func(RPCClient, io.Writer) MCPServer
 
 // Dependencies are process boundaries injected for deterministic command tests.
 type Dependencies struct {
@@ -49,12 +55,13 @@ type Dependencies struct {
 	NewServer      ServerFactory
 	LoadHTTPToken  HTTPTokenLoader
 	NewHTTPServer  HTTPServerFactory
+	NewMCPServer   MCPServerFactory
 }
 
 func DefaultDependencies(paths daemon.RuntimePaths) Dependencies {
 	return Dependencies{Stdin: os.Stdin, Stdout: os.Stdout, Stderr: os.Stderr, Paths: paths, NewClient: func(socket string) RPCClient { return client.New(socket, client.Options{}) }, NewServer: func(paths daemon.RuntimePaths) Server { return daemon.NewServer(paths) }, LoadHTTPToken: daemon.LoadOrCreateHTTPToken, NewHTTPServer: func(c RPCClient, token, listen string) (HTTPServer, error) {
 		return httpapi.New(c, token, httpapi.Options{Listen: listen})
-	}}
+	}, NewMCPServer: func(c RPCClient, stderr io.Writer) MCPServer { return mcpserver.New(c, stderr) }}
 }
 
 type ExitError struct{ Message string }
@@ -95,13 +102,15 @@ func Run(ctx context.Context, args []string, deps Dependencies) error {
 		return runDoctor(ctx, args[1:], deps)
 	case "serve":
 		return runServe(ctx, args[1:], deps)
+	case "mcp":
+		return runMCP(ctx, args[1:], deps)
 	default:
 		printUsage(deps.Stderr)
 		return usage("unknown command: " + args[0])
 	}
 }
 func printUsage(w io.Writer) {
-	_, _ = fmt.Fprint(w, "usage: pi-token-smith <daemon|status|search|inspect|doctor|serve> [options]\n")
+	_, _ = fmt.Fprint(w, "usage: pi-token-smith <daemon|status|search|inspect|doctor|serve|mcp> [options]\n")
 }
 func flags(name string, stderr io.Writer) *flag.FlagSet {
 	f := flag.NewFlagSet(name, flag.ContinueOnError)
@@ -226,6 +235,21 @@ func inspectFile(ctx context.Context, c RPCClient, id string, offset, limit uint
 	complete = true
 	return nil
 }
+func runMCP(ctx context.Context, args []string, deps Dependencies) error {
+	if len(args) != 0 {
+		return usage("mcp accepts no arguments")
+	}
+	if deps.Stdin == nil || deps.NewMCPServer == nil {
+		return errors.New("CLI MCP dependencies are incomplete")
+	}
+	c, err := getClient(deps)
+	if err != nil {
+		return err
+	}
+	defer c.Close()
+	return deps.NewMCPServer(c, deps.Stderr).Listen(ctx, deps.Stdin, deps.Stdout)
+}
+
 func runServe(ctx context.Context, args []string, deps Dependencies) error {
 	if deps.LoadHTTPToken == nil || deps.NewHTTPServer == nil {
 		return errors.New("CLI serve dependencies are incomplete")

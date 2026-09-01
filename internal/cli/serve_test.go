@@ -30,6 +30,9 @@ func (*serveClient) Info(context.Context) (client.Info, error) { return client.I
 func (*serveClient) Search(context.Context, string, int) ([]client.EventReference, error) {
 	return nil, nil
 }
+func (*serveClient) EventMetadata(context.Context, string) (client.EventMetadata, error) {
+	return client.EventMetadata{}, nil
+}
 func (*serveClient) ReadPayload(context.Context, string, uint64, uint64, io.Writer) (client.PayloadMetadata, error) {
 	return client.PayloadMetadata{}, nil
 }

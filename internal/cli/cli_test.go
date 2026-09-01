@@ -29,6 +29,9 @@ func (f *fakeClient) Info(context.Context) (client.Info, error)     { return cli
 func (f *fakeClient) Search(context.Context, string, int) ([]client.EventReference, error) {
 	return f.events, nil
 }
+func (f *fakeClient) EventMetadata(context.Context, string) (client.EventMetadata, error) {
+	return client.EventMetadata{}, nil
+}
 func (f *fakeClient) ReadPayload(_ context.Context, _ string, _, _ uint64, w io.Writer) (client.PayloadMetadata, error) {
 	if f.readErr != nil && !f.writeThenErr {
 		return client.PayloadMetadata{}, f.readErr
